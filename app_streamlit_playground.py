@@ -1,15 +1,4 @@
-# HUL ERP Simulator + Product Playground — Integrated Streamlit App
-
-"""
-Full Streamlit app with:
-1. Synthetic ERP transactions (20k rows)
-2. Customer-level aggregation (RFM + behavioral)
-3. XGBoost adoption model
-4. Product Playground: affinity, compatibility
-5. SHAP explainability
-6. A/B test simulation
-7. Downloads for datasets & visuals
-"""
+# HUL ERP Simulator + Product Playground — Fully Patched
 
 import streamlit as st
 import pandas as pd
@@ -30,23 +19,27 @@ import os
 # -------------------------
 # Config / paths
 # -------------------------
+TRANSACTION_CSV = 'synthetic_erp_transactions.csv'
 CUSTOMER_FEATURES_CSV = 'customer_features.csv'
 XGB_MODEL_PATH = 'xgb_cust_model.joblib'
 VECTORIZER_PATH = 'product_vectorizer.joblib'
 SCALER_BEHAV_PATH = 'customer_behavior_scaler.joblib'
 
+N_TRANSACTIONS = 20000
+
 # -------------------------
-# Synthetic ERP generator
+# Helper: Generate or load synthetic ERP transactions
 # -------------------------
 def generate_or_load_transactions(force_generate=False, n_customers=20000):
     if not force_generate:
         try:
-            df_tx = pd.read_csv("synthetic_transactions.csv")
+            df_tx = pd.read_csv(TRANSACTION_CSV)
             launch_skus = df_tx['sku'].unique().tolist()
             return df_tx, launch_skus
         except FileNotFoundError:
             pass
 
+    # Generate customers
     customer_ids = [f"CUST{i:05d}" for i in range(1, n_customers + 1)]
     sku_list = [
         {"sku": "DOVE_SHAMPOO_180ML", "price": 149, "category": "Haircare", "is_launch": 0},
@@ -56,7 +49,6 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
     ]
     launch_skus = [s["sku"] for s in sku_list]
     channels = ["Kirana", "Modern Trade", "Online", "Wholesale", "Direct"]
-
     records = []
     start_date = datetime.today() - timedelta(days=365)
 
@@ -71,7 +63,6 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
             net = round(units * price_per_unit * (1 - discount/100), 2)
             channel = np.random.choice(channels, p=[0.25,0.35,0.2,0.15,0.05])
             invoice_status = np.random.choice(['Completed','Returned'], p=[0.95,0.05])
-
             records.append({
                 "customer_id": cust,
                 "sku": sku['sku'],
@@ -84,13 +75,12 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
                 "invoice_status": invoice_status,
                 "is_launch_sku": sku['is_launch']
             })
-
     df_tx = pd.DataFrame(records)
-    df_tx.to_csv("synthetic_transactions.csv", index=False)
+    df_tx.to_csv(TRANSACTION_CSV, index=False)
     return df_tx, launch_skus
 
 # -------------------------
-# Customer aggregation
+# Aggregate to customer-level features
 # -------------------------
 def aggregate_customer_features(df):
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
@@ -102,40 +92,42 @@ def aggregate_customer_features(df):
     frequency = df.groupby('customer_id').size().reset_index(name='frequency_tx')
 
     monetary = df.groupby('customer_id')['net_amount'].agg(total_spend='sum', avg_ticket='mean').reset_index()
+
     more = df.groupby('customer_id').agg(avg_discount=('discount','mean'), avg_units=('units','mean')).reset_index()
 
-    pref_channel = (
-        df.groupby(['customer_id','channel']).size().reset_index(name='cnt')
-        .sort_values(['customer_id','cnt'], ascending=[True,False])
-        .drop_duplicates('customer_id')
-        [['customer_id','channel']].rename(columns={'channel':'preferred_channel'})
-    )
+    pref_channel = (df.groupby(['customer_id', 'channel'])
+                      .size()
+                      .reset_index(name='cnt')
+                      .sort_values(['customer_id','cnt'], ascending=[True,False])
+                      .drop_duplicates('customer_id'))[['customer_id','channel']].rename(columns={'channel':'preferred_channel'})
 
-    top_cat = (
-        df.groupby(['customer_id','category']).size().reset_index(name='cnt')
-        .sort_values(['customer_id','cnt'], ascending=[True,False])
-        .drop_duplicates('customer_id')
-        [['customer_id','category']].rename(columns={'category':'top_category'})
-    )
+    top_cat = (df.groupby(['customer_id','category'])
+                 .size()
+                 .reset_index(name='cnt')
+                 .sort_values(['customer_id','cnt'], ascending=[True,False])
+                 .drop_duplicates('customer_id'))[['customer_id','category']].rename(columns={'category':'top_category'})
 
-    ret = df.groupby('customer_id').apply(lambda x: (x['invoice_status']=='Returned').sum()/len(x)).reset_index(name='return_rate')
+    # Fixed return rate calculation
+    ret = df.groupby('customer_id').agg(return_rate=('invoice_status', lambda x: (x=='Returned').sum()/len(x))).reset_index()
 
     recent_cutoff = df['date'].max() - pd.Timedelta(days=120)
-    adopters = (
-        df[(df['is_launch_sku']==1) & (df['date']>=recent_cutoff)]
-        .groupby('customer_id').size().reset_index(name='adopt_count')
-    )
+    adopters = (df[(df['is_launch_sku']==1) & (df['date']>=recent_cutoff)]
+                .groupby('customer_id')
+                .size()
+                .reset_index(name='adopt_count'))
     adopters['adopter_of_new_launch'] = 1
 
     parts = [recency[['customer_id','recency_days']], frequency, monetary, more, pref_channel, top_cat, ret]
     cust = parts[0]
     for p in parts[1:]:
         cust = cust.merge(p, on='customer_id', how='left')
+
     cust = cust.merge(adopters[['customer_id','adopter_of_new_launch']], on='customer_id', how='left')
     cust['adopter_of_new_launch'] = cust['adopter_of_new_launch'].fillna(0).astype(int)
 
     num_cols = ['frequency_tx','total_spend','avg_ticket','avg_discount','avg_units','return_rate']
     cust[num_cols] = cust[num_cols].fillna(0)
+
     cust.to_csv(CUSTOMER_FEATURES_CSV, index=False)
     return cust
 
@@ -155,7 +147,7 @@ def build_product_vectorizer():
     cat_pipe = Pipeline([('ohe', OneHotEncoder(handle_unknown='ignore', sparse=False))])
     num_pipe = Pipeline([('scaler', StandardScaler())])
     vectorizer = ColumnTransformer([('cat', cat_pipe, categorical_cols), ('num', num_pipe, numeric_cols)], remainder='drop')
-
+    # Fit on sample
     sample = []
     for cat in PRODUCT_SCHEMA['category']:
         for sub in PRODUCT_SCHEMA['sub_category'][:3]:
@@ -175,19 +167,17 @@ def build_customer_vectors(cust_df, vectorizer):
     cdf['channel_focus'] = cdf['preferred_channel'].fillna('General Trade')
     cdf['price'] = cdf['avg_ticket'].fillna(100)
     cdf['pack_size'] = cdf['avg_units'].fillna(100)
-
     prod_like = cdf[['category','sub_category','tier','channel_focus','price','pack_size']]
     prod_vecs = vectorizer.transform(prod_like)
     behavior_cols = ['recency_days','frequency_tx','total_spend','avg_ticket','avg_discount','avg_units','return_rate']
     scaler = StandardScaler()
     beh = scaler.fit_transform(cdf[behavior_cols].fillna(0))
-
     cust_vectors = np.hstack([prod_vecs, beh])
     joblib.dump(scaler, SCALER_BEHAV_PATH)
     return cust_vectors, scaler
 
 # -------------------------
-# Train XGBoost
+# Train XGBoost model
 # -------------------------
 def train_xgb_customer(cust_df, vectorizer):
     X_vecs, scaler = build_customer_vectors(cust_df, vectorizer)
@@ -201,10 +191,11 @@ def train_xgb_customer(cust_df, vectorizer):
     return bst, X_test, y_test
 
 # -------------------------
-# Product affinity
+# Compute affinity & compatibility
 # -------------------------
 def product_to_vector(product, vectorizer):
-    return vectorizer.transform(pd.DataFrame([product]))
+    pdf = pd.DataFrame([product])
+    return vectorizer.transform(pdf)
 
 def compute_affinity(product, cust_df, bst, vectorizer, weight_cos=0.4, weight_model=0.6, top_k=100):
     pvec = product_to_vector(product, vectorizer)
@@ -212,16 +203,13 @@ def compute_affinity(product, cust_df, bst, vectorizer, weight_cos=0.4, weight_m
     prod_cols = pvec.shape[1]
     cust_prod_part = cust_vecs[:, :prod_cols]
     cos = cosine_similarity(cust_prod_part, pvec.reshape(1,-1)).flatten()
-
     X_model = cust_vecs.copy()
     X_model[:, :prod_cols] = np.repeat(pvec, X_model.shape[0], axis=0)
     dmat = xgb.DMatrix(X_model)
     prob = bst.predict(dmat)
-
     mean_combo = weight_cos * np.mean(cos) + weight_model * np.mean(prob)
     topk_idx = np.argsort(prob)[-top_k:]
     topk_combo = weight_cos * np.mean(cos[topk_idx]) + weight_model * np.mean(prob[topk_idx])
-
     df_res = pd.DataFrame({'customer_id': cust_df['customer_id'].values, 'cosine_affinity': cos, 'pred_prob': prob})
     return {'compatibility_score_overall': float(mean_combo),
             'compatibility_score_topk': float(topk_combo),
@@ -254,34 +242,38 @@ def simulate_ab_test(selected_customers, predicted_probs, baseline_conv_rate=0.0
 # -------------------------
 # Streamlit UI
 # -------------------------
-st.set_page_config(page_title='HUL Product Playground', layout='wide')
-st.title('HUL — Product Playground, Affinity, SHAP & A/B Simulator')
+st.set_page_config(page_title='HUL Product Playground & Affinity', layout='wide')
+st.title('HUL — Product Playground, Affinity Scoring, SHAP & A/B Simulator')
 
+# Load or generate transactions
 with st.sidebar.expander('Dataset'):
     if st.button('(Re)Generate synthetic ERP transactions (20k)'):
         df_tx, launch_skus = generate_or_load_transactions(force_generate=True)
-        st.success('Generated transactions.')
+        st.success('Generated and saved transactions.')
     else:
         df_tx, launch_skus = generate_or_load_transactions()
-    st.write(f'{len(df_tx)} transactions — {len(df_tx.customer_id.unique())} customers')
+    st.write(f'{len(df_tx)} transactions loaded — {len(df_tx.customer_id.unique())} customers')
     if st.checkbox('Show sample transactions'):
         st.dataframe(df_tx.sample(200))
 
+# Aggregate
 if st.sidebar.button('Aggregate customer features'):
     with st.spinner('Aggregating...'):
         cust_df = aggregate_customer_features(df_tx)
-    st.success(f'Aggregated {len(cust_df)} customers')
+    st.success(f'Aggregated to {len(cust_df)} customers')
 else:
     if os.path.exists(CUSTOMER_FEATURES_CSV):
         cust_df = pd.read_csv(CUSTOMER_FEATURES_CSV)
     else:
         cust_df = aggregate_customer_features(df_tx)
 
+# Product Playground Inputs
 st.sidebar.markdown('---')
 st.sidebar.header('Product Playground')
-prod_category = st.sidebar.selectbox('Category', PRODUCT_SCHEMA['category'])
-prod_subcat = st.sidebar.selectbox('Sub-category', PRODUCT_SCHEMA['sub_category'])
-prod_tier = st.sidebar.selectbox('Tier', PRODUCT_SCHEMA['tier'])
+colp1, colp2, colp3 = st.sidebar.columns(3)
+prod_category = colp1.selectbox('Category', PRODUCT_SCHEMA['category'])
+prod_subcat = colp2.selectbox('Sub-category', PRODUCT_SCHEMA['sub_category'])
+prod_tier = colp3.selectbox('Tier', PRODUCT_SCHEMA['tier'])
 prod_channel = st.sidebar.selectbox('Channel focus', PRODUCT_SCHEMA['channel_focus'])
 prod_price = st.sidebar.slider('Price (INR)', 50, 2000, 399)
 prod_pack = st.sidebar.slider('Pack size (ml/g)', 30, 500, 100)
@@ -297,63 +289,82 @@ st.sidebar.header('A/B Test Simulator')
 baseline_rate = st.sidebar.slider('Baseline conversion rate', 0.0, 0.2, 0.02)
 n_sim_runs = st.sidebar.number_input('Simulation runs', 100, 5000, 1000)
 
-# Load or build vectorizer & model
+# Build vectorizer and model
 vectorizer = joblib.load(VECTORIZER_PATH) if os.path.exists(VECTORIZER_PATH) else build_product_vectorizer()
 if os.path.exists(XGB_MODEL_PATH) and os.path.exists(SCALER_BEHAV_PATH):
     bst = joblib.load(XGB_MODEL_PATH)
 else:
-    st.info('Training XGBoost on aggregated customers...')
-    bst, X_test_sample, y_test_sample = train_xgb_customer(cust_df, vectorizer)
+    st.info('Training XGBoost on aggregated customers (may take ~30s)')
+    bst, _, _ = train_xgb_customer(cust_df, vectorizer)
 
 # Product dict
-product = {'category': prod_category, 'sub_category': prod_subcat, 'tier': prod_tier,
-           'channel_focus': prod_channel, 'price': prod_price, 'pack_size': prod_pack}
+product = {'category': prod_category, 'sub_category': prod_subcat, 'tier': prod_tier, 'channel_focus': prod_channel, 'price': prod_price, 'pack_size': prod_pack}
 
+# Run affinity
 if st.button('Compute affinity & compatibility'):
-    with st.spinner('Computing...'):
-        res = compute_affinity(product, cust_df, bst, vectorizer,
-                               weight_cos=weight_cos, weight_model=weight_model, top_k=top_k)
+    with st.spinner('Computing affinity...'):
+        res = compute_affinity(product, cust_df, bst, vectorizer, weight_cos=weight_cos, weight_model=weight_model, top_k=top_k)
     st.metric('Compatibility score (overall)', f'{res["compatibility_score_overall"]:.3f}')
     st.metric(f'Compatibility score (top {top_k})', f'{res["compatibility_score_topk"]:.3f}')
-    st.success(compatibility_verdict(res["compatibility_score_topk"]))
+    st.success(compatibility_verdict(res['compatibility_score_topk']))
 
+    # Predicted probability histogram
     fig1, ax1 = plt.subplots()
     ax1.hist(res['results']['pred_prob'], bins=40)
     ax1.set_title('Predicted adoption probability distribution')
     st.pyplot(fig1)
 
+    # Top customers table
     st.markdown('### Top matching customers')
     st.dataframe(res['top_customers'].head(200))
 
-    if st.checkbox('Show SHAP summary for top customers'):
-        pvec = product_to_vector(product, vectorizer)
-        cust_vecs, _ = build_customer_vectors(cust_df, vectorizer)
-        X_model = cust_vecs.copy()
-        X_model[:, :pvec.shape[1]] = np.repeat(pvec, X_model.shape[0], axis=0)
-        sample_idx = np.argsort(res['results']['pred_prob'])[-min(500, len(res['results'])):]
-        X_shap = X_model[sample_idx]
-        explainer = shap.TreeExplainer(bst)
-        shap_values = explainer.shap_values(X_shap)
-        cat_names = list(vectorizer.named_transformers_['cat'].named_steps['ohe'].get_feature_names_out(['category','sub_category','tier','channel_focus']))
-        num_names = ['price','pack_size']
-        behavior_cols = ['recency_days','frequency_tx','total_spend','avg_ticket','avg_discount','avg_units','return_rate']
-        feature_names = cat_names + num_names + behavior_cols
-        fig, ax = plt.subplots(figsize=(10,6))
-        shap.summary_plot(shap_values, X_shap, feature_names=feature_names, plot_type='bar', show=False)
-        st.pyplot(fig)
+    # SHAP
+    if st.checkbox('Show SHAP summary for model predictions (top customers)'):
+        with st.spinner('Computing SHAP values...'):
+            top_customers = res['top_customers']
+            n_sample = min(500, len(top_customers))
+            sample_idx = top_customers.index[:n_sample]
 
+            pvec = product_to_vector(product, vectorizer)
+            cust_vecs, _ = build_customer_vectors(cust_df, vectorizer)
+            X_model = cust_vecs.copy()
+            prod_cols = pvec.shape[1]
+            X_model[:, :prod_cols] = np.repeat(pvec, X_model.shape[0], axis=0)
+
+            X_shap = X_model[sample_idx]
+            explainer = shap.TreeExplainer(bst)
+            shap_values = explainer.shap_values(X_shap)
+
+            cat_names = []
+            if hasattr(vectorizer.named_transformers_['cat'], 'named_steps'):
+                cat_names = list(vectorizer.named_transformers_['cat'].named_steps['ohe'].get_feature_names_out(['category','sub_category','tier','channel_focus']))
+            num_names = ['price','pack_size']
+            behavior_cols = ['recency_days','frequency_tx','total_spend','avg_ticket','avg_discount','avg_units','return_rate']
+            feature_names = cat_names + num_names + behavior_cols
+
+            fig_shap, ax_shap = plt.subplots(figsize=(10,6))
+            shap.summary_plot(shap_values, X_shap, feature_names=feature_names, show=False)
+            st.pyplot(fig_shap)
+
+    # A/B simulation
     if st.checkbox('Run A/B test simulation on top customers'):
         top_customers = res['top_customers']
-        selected_n = st.slider('Number of customers for test', 50, min(200, len(top_customers)), 200)
+        max_customers = len(top_customers)
+        selected_n = st.slider('Select number of customers for test', 10, min(200, max_customers), min(100, max_customers))
         sample_customers = top_customers.head(selected_n)
-        sim = simulate_ab_test(sample_customers['customer_id'].tolist(),
-                               sample_customers['pred_prob'].values,
-                               baseline_conv_rate=baseline_rate, n_runs=n_sim_runs)
+        sim = simulate_ab_test(
+            sample_customers['customer_id'].tolist(),
+            sample_customers['pred_prob'].values,
+            baseline_conv_rate=baseline_rate,
+            n_runs=n_sim_runs
+        )
+        st.markdown('### A/B simulation results')
         st.json(sim)
 
+    # Download results
     csv_buf = io.StringIO()
     res['results'].to_csv(csv_buf, index=False)
     st.download_button('Download per-customer predictions', data=csv_buf.getvalue(), file_name='per_customer_predictions.csv')
 
 st.markdown('---')
-st.info('Adjust weights to balance cosine vs model. Use SHAP to understand feature impact.')
+st.info('Tips: Tweak weights to balance similarity vs predicted adoption. Use SHAP to understand what drives adoption.')
