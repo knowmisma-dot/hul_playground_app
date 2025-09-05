@@ -145,33 +145,90 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
 # -------------------------
 
 def aggregate_customer_features(df):
+    # Ensure 'date' is datetime
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+    # Reference date for recency calculation
     reference_date = df['date'].max() + pd.Timedelta(days=1)
+
+    # Recency
     recency = df.groupby('customer_id')['date'].max().reset_index()
     recency['recency_days'] = (reference_date - recency['date']).dt.days
+
+    # Frequency
     frequency = df.groupby('customer_id').size().reset_index(name='frequency_tx')
-    monetary = df.groupby('customer_id')['net_sales_value'].agg(total_spend='sum', avg_ticket='mean').reset_index()
-    more = df.groupby('customer_id').agg(avg_discount=('discount_pct','mean'), avg_units=('units_sold','mean')).reset_index()
-    pref_channel = df.groupby(['customer_id','channel']).size().reset_index(name='cnt')
-    pref_channel = pref_channel.sort_values(['customer_id','cnt'], ascending=[True,False]).drop_duplicates('customer_id')
-    pref_channel = pref_channel[['customer_id','channel']].rename(columns={'channel':'preferred_channel'})
-    top_cat = df.groupby(['customer_id','category']).size().reset_index(name='cnt')
-    top_cat = top_cat.sort_values(['customer_id','cnt'], ascending=[True,False]).drop_duplicates('customer_id')
-    top_cat = top_cat[['customer_id','category']].rename(columns={'category':'top_category'})
-    ret = df.groupby('customer_id').apply(lambda x: (x['invoice_status']=='Returned').sum()/len(x)).reset_index(name='return_rate')
+
+    # Monetary
+    monetary = df.groupby('customer_id')['net_sales_value'].agg(
+        total_spend='sum', avg_ticket='mean'
+    ).reset_index()
+
+    # More metrics
+    more = df.groupby('customer_id').agg(
+        avg_discount=('discount_pct', 'mean'),
+        avg_units=('units_sold', 'mean')
+    ).reset_index()
+
+    # Preferred channel
+    pref_channel = (
+        df.groupby(['customer_id', 'channel'])
+        .size()
+        .reset_index(name='cnt')
+        .sort_values(['customer_id', 'cnt'], ascending=[True, False])
+        .drop_duplicates('customer_id')
+    )
+    pref_channel = pref_channel[['customer_id', 'channel']].rename(
+        columns={'channel': 'preferred_channel'}
+    )
+
+    # Top category
+    top_cat = (
+        df.groupby(['customer_id', 'category'])
+        .size()
+        .reset_index(name='cnt')
+        .sort_values(['customer_id', 'cnt'], ascending=[True, False])
+        .drop_duplicates('customer_id')
+    )
+    top_cat = top_cat[['customer_id', 'category']].rename(
+        columns={'category': 'top_category'}
+    )
+
+    # Return rate
+    ret = df.groupby('customer_id').apply(
+        lambda x: (x['invoice_status'] == 'Returned').sum() / len(x)
+    ).reset_index(name='return_rate')
+
+    # Adopters of new launch (last 120 days)
     recent_cutoff = df['date'].max() - pd.Timedelta(days=120)
-    adopters = df[(df['is_launch_sku']==1) & (df['date']>=recent_cutoff)].groupby('customer_id').size().reset_index(name='adopt_count')
+    adopters = (
+        df[(df['is_launch_sku'] == 1) & (df['date'] >= recent_cutoff)]
+        .groupby('customer_id')
+        .size()
+        .reset_index(name='adopt_count')
+    )
     adopters['adopter_of_new_launch'] = 1
-    parts = [recency[['customer_id','recency_days']], frequency, monetary, more, pref_channel, top_cat, ret]
+
+    # Merge all features
+    parts = [recency[['customer_id', 'recency_days']], frequency, monetary, more, pref_channel, top_cat, ret]
     cust = parts[0]
     for p in parts[1:]:
         cust = cust.merge(p, on='customer_id', how='left')
-    cust = cust.merge(adopters[['customer_id','adopter_of_new_launch']], on='customer_id', how='left')
+
+    cust = cust.merge(
+        adopters[['customer_id', 'adopter_of_new_launch']], 
+        on='customer_id', how='left'
+    )
     cust['adopter_of_new_launch'] = cust['adopter_of_new_launch'].fillna(0).astype(int)
-    num_cols = ['frequency_tx','total_spend','avg_ticket','avg_discount','avg_units','return_rate']
-    for c in num_cols:
-        cust[c] = cust[c].fillna(0)
+
+    # Fill NaNs in numeric columns
+    num_cols = ['frequency_tx', 'total_spend', 'avg_ticket', 'avg_discount', 'avg_units', 'return_rate']
+    cust[num_cols] = cust[num_cols].fillna(0)
+
+    # Save to CSV
     cust.to_csv(CUSTOMER_FEATURES_CSV, index=False)
+
     return cust
+
 
 # -------------------------
 # Product vectorizer & customer vectors
