@@ -63,82 +63,82 @@ N_TRANSACTIONS = 20000
 # Helper: Generate or load synthetic ERP transactions
 # -------------------------
 
-def generate_or_load_transactions(force_generate=False):
-    if not force_generate and os.path.exists(TRANSACTION_CSV):
-        df = pd.read_csv(TRANSACTION_CSV, parse_dates=['date'])
-        launch_skus = df[df['is_launch_sku']==1]['sku_id'].unique().tolist()
-        return df, launch_skus
+def generate_or_load_transactions(force_generate=False, n_customers=20000):
+    """
+    Generates synthetic ERP transactions for testing the HUL Virtual Trials app.
+    Returns:
+        df_tx: Pandas DataFrame of transactions
+        launch_skus: list of SKUs used in the simulation
+    """
+    
+    # Check if CSV exists (skip if not forcing)
+    if not force_generate:
+        try:
+            df_tx = pd.read_csv("synthetic_transactions.csv")
+            launch_skus = df_tx['sku'].unique().tolist()
+            return df_tx, launch_skus
+        except FileNotFoundError:
+            pass
 
-    # generate fresh
-    np.random.seed(42)
-    categories = ['skincare','haircare','oral_care','fragrance','personal_wash']
-    subcats_map = {
-        'skincare': ['moisturizer','serum','cleanser','face_mask'],
-        'haircare': ['shampoo','conditioner','hair_oil'],
-        'oral_care': ['toothpaste','mouthwash'],
-        'fragrance': ['deodorant','perfume'],
-        'personal_wash': ['soap','body_wash']
-    }
-    channels = ['Modern Trade','General Trade','E-commerce','Pharmacy','Salon']
-    payment_methods = ['Cash','Credit','Digital']
-    states = ['Maharashtra','Karnataka','Tamil Nadu','Uttar Pradesh','Delhi','Gujarat','Rajasthan']
-
-    n_customers = int(N_TRANSACTIONS * 0.1)
-    customer_ids = [f'CUST{1000+i}' for i in range(n_customers)]
-
-    sku_list = []
-    sku_id = 100
-    for cat in categories:
-        for sub in subcats_map[cat]:
-            for tier in ['economy','standard','premium']:
-                sku = {'sku_id': f'SKU{sku_id}', 'category': cat, 'sub_category': sub, 'tier': tier}
-                base = {'skincare': 250, 'haircare':150, 'oral_care':80, 'fragrance':200, 'personal_wash':60}[cat]
-                multiplier = {'economy':0.6,'standard':1.0,'premium':2.0}[tier]
-                sku['price'] = round(np.random.uniform(base*multiplier*0.8, base*multiplier*1.2),2)
-                sku_list.append(sku)
-                sku_id += 1
-
-    # pick launch SKUs
-    launch_skus = [s['sku_id'] for s in np.random.choice(sku_list, size=6, replace=False)]
-
-    rows = []
+    # -------------------
+    # Generate customers
+    # -------------------
+    customer_ids = [f"CUST{i:05d}" for i in range(1, n_customers + 1)]
+    
+    # -------------------
+    # Define SKUs / products
+    # -------------------
+    sku_list = [
+        {"sku": "DOVE_SHAMPOO_180ML", "price": 149, "category": "Haircare"},
+        {"sku": "DOVE_SHAMPOO_360ML", "price": 249, "category": "Haircare"},
+        {"sku": "LUX_SOAP_75G", "price": 45, "category": "Bath"},
+        {"sku": "POND'S_CREAM_50G", "price": 99, "category": "Skincare"},
+    ]
+    
+    launch_skus = [s["sku"] for s in sku_list]
+    
+    # -------------------
+    # Channels
+    # -------------------
+    channels = ["Kirana", "Modern Trade", "Online", "Wholesale", "Direct"]
+    
+    # -------------------
+    # Generate transactions
+    # -------------------
+    records = []
     start_date = datetime.today() - timedelta(days=365)
-    for i in range(N_TRANSACTIONS):
-        cust = np.random.choice(customer_ids)
-        sku = np.random.choice(sku_list)
-        date = start_date + timedelta(days=int(np.random.exponential(scale=120)))
-        units = int(np.random.choice([1,1,1,2,3], p=[0.6,0.1,0.1,0.15,0.05]))
-        discount = float(np.round(np.random.choice([0,5,10,15,20], p=[0.5,0.2,0.15,0.1,0.05])),2)
-        price_per_unit = sku['price']
-        net = round(units * price_per_unit * (1 - discount/100),2)
-        channel = np.random.choice(channels, p=[0.25,0.35,0.2,0.15,0.05])
-        payment = np.random.choice(payment_methods, p=[0.4,0.35,0.25])
-        state = np.random.choice(states)
-        invoice_status = np.random.choice(['Paid','Pending','Returned'], p=[0.9,0.08,0.02])
-        is_launch = 1 if sku['sku_id'] in launch_skus and (date > datetime.today() - timedelta(days=120)) else 0
-        rows.append({
-            'transaction_id': f'TX{i+1}',
-            'customer_id': cust,
-            'date': date.date().isoformat(),
-            'sku_id': sku['sku_id'],
-            'category': sku['category'],
-            'sub_category': sku['sub_category'],
-            'tier': sku['tier'],
-            'units_sold': units,
-            'price_per_unit': price_per_unit,
-            'discount_pct': discount,
-            'net_sales_value': net,
-            'channel': channel,
-            'payment_method': payment,
-            'state': state,
-            'invoice_status': invoice_status,
-            'is_launch_sku': is_launch
-        })
-    df = pd.DataFrame(rows)
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date').reset_index(drop=True)
-    df.to_csv(TRANSACTION_CSV, index=False)
-    return df, launch_skus
+    
+    for cust in customer_ids:
+        n_tx = np.random.poisson(5)  # avg 5 transactions per customer
+        for _ in range(n_tx):
+            sku = np.random.choice(sku_list)
+            date = start_date + timedelta(days=int(np.random.exponential(30)))
+            units = int(np.random.choice([1,1,1,2,3], p=[0.6,0.1,0.1,0.15,0.05]))
+            discount = round(np.random.choice([0,5,10,15,20], p=[0.5,0.2,0.15,0.1,0.05]), 2)
+            price_per_unit = sku['price']
+            net = round(units * price_per_unit * (1 - discount/100), 2)
+            channel = np.random.choice(channels, p=[0.25,0.35,0.2,0.15,0.05])
+            
+            records.append({
+                "customer_id": cust,
+                "sku": sku['sku'],
+                "category": sku['category'],
+                "date": date.strftime("%Y-%m-%d"),
+                "units": units,
+                "discount": discount,
+                "net_amount": net,
+                "channel": channel
+            })
+    
+    # -------------------
+    # Build DataFrame
+    # -------------------
+    df_tx = pd.DataFrame(records)
+    
+    # Save for later reuse
+    df_tx.to_csv("synthetic_transactions.csv", index=False)
+    
+    return df_tx, launch_skus
 
 # -------------------------
 # Aggregate to customer-level features
