@@ -80,36 +80,28 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
         except FileNotFoundError:
             pass
 
-    # -------------------
     # Generate customers
-    # -------------------
     customer_ids = [f"CUST{i:05d}" for i in range(1, n_customers + 1)]
     
-    # -------------------
     # Define SKUs / products
-    # -------------------
     sku_list = [
-        {"sku": "DOVE_SHAMPOO_180ML", "price": 149, "category": "Haircare"},
-        {"sku": "DOVE_SHAMPOO_360ML", "price": 249, "category": "Haircare"},
-        {"sku": "LUX_SOAP_75G", "price": 45, "category": "Bath"},
-        {"sku": "POND'S_CREAM_50G", "price": 99, "category": "Skincare"},
+        {"sku": "DOVE_SHAMPOO_180ML", "price": 149, "category": "Haircare", "is_launch": 0},
+        {"sku": "DOVE_SHAMPOO_360ML", "price": 249, "category": "Haircare", "is_launch": 1},
+        {"sku": "LUX_SOAP_75G", "price": 45, "category": "Bath", "is_launch": 0},
+        {"sku": "PONDS_CREAM_50G", "price": 99, "category": "Skincare", "is_launch": 1},
     ]
     
     launch_skus = [s["sku"] for s in sku_list]
     
-    # -------------------
     # Channels
-    # -------------------
     channels = ["Kirana", "Modern Trade", "Online", "Wholesale", "Direct"]
     
-    # -------------------
     # Generate transactions
-    # -------------------
     records = []
     start_date = datetime.today() - timedelta(days=365)
     
     for cust in customer_ids:
-        n_tx = np.random.poisson(5)  # avg 5 transactions per customer
+        n_tx = np.random.poisson(5)
         for _ in range(n_tx):
             sku = np.random.choice(sku_list)
             date = start_date + timedelta(days=int(np.random.exponential(30)))
@@ -118,6 +110,7 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
             price_per_unit = sku['price']
             net = round(units * price_per_unit * (1 - discount/100), 2)
             channel = np.random.choice(channels, p=[0.25,0.35,0.2,0.15,0.05])
+            invoice_status = np.random.choice(['Completed','Returned'], p=[0.95,0.05])
             
             records.append({
                 "customer_id": cust,
@@ -127,15 +120,12 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
                 "units": units,
                 "discount": discount,
                 "net_amount": net,
-                "channel": channel
+                "channel": channel,
+                "invoice_status": invoice_status,
+                "is_launch_sku": sku['is_launch']
             })
     
-    # -------------------
-    # Build DataFrame
-    # -------------------
     df_tx = pd.DataFrame(records)
-    
-    # Save for later reuse
     df_tx.to_csv("synthetic_transactions.csv", index=False)
     
     return df_tx, launch_skus
@@ -145,10 +135,10 @@ def generate_or_load_transactions(force_generate=False, n_customers=20000):
 # -------------------------
 
 def aggregate_customer_features(df):
-    # Ensure 'date' is datetime
+    # Ensure date is datetime
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
-
-    # Reference date for recency calculation
+    
+    # Reference date for recency
     reference_date = df['date'].max() + pd.Timedelta(days=1)
 
     # Recency
@@ -159,14 +149,14 @@ def aggregate_customer_features(df):
     frequency = df.groupby('customer_id').size().reset_index(name='frequency_tx')
 
     # Monetary
-    monetary = df.groupby('customer_id')['net_sales_value'].agg(
+    monetary = df.groupby('customer_id')['net_amount'].agg(
         total_spend='sum', avg_ticket='mean'
     ).reset_index()
 
     # More metrics
     more = df.groupby('customer_id').agg(
-        avg_discount=('discount_pct', 'mean'),
-        avg_units=('units_sold', 'mean')
+        avg_discount=('discount','mean'),
+        avg_units=('units','mean')
     ).reset_index()
 
     # Preferred channel
@@ -174,60 +164,52 @@ def aggregate_customer_features(df):
         df.groupby(['customer_id', 'channel'])
         .size()
         .reset_index(name='cnt')
-        .sort_values(['customer_id', 'cnt'], ascending=[True, False])
+        .sort_values(['customer_id','cnt'], ascending=[True,False])
         .drop_duplicates('customer_id')
     )
-    pref_channel = pref_channel[['customer_id', 'channel']].rename(
-        columns={'channel': 'preferred_channel'}
-    )
+    pref_channel = pref_channel[['customer_id','channel']].rename(columns={'channel':'preferred_channel'})
 
     # Top category
     top_cat = (
-        df.groupby(['customer_id', 'category'])
+        df.groupby(['customer_id','category'])
         .size()
         .reset_index(name='cnt')
-        .sort_values(['customer_id', 'cnt'], ascending=[True, False])
+        .sort_values(['customer_id','cnt'], ascending=[True,False])
         .drop_duplicates('customer_id')
     )
-    top_cat = top_cat[['customer_id', 'category']].rename(
-        columns={'category': 'top_category'}
-    )
+    top_cat = top_cat[['customer_id','category']].rename(columns={'category':'top_category'})
 
     # Return rate
     ret = df.groupby('customer_id').apply(
-        lambda x: (x['invoice_status'] == 'Returned').sum() / len(x)
+        lambda x: (x['invoice_status']=='Returned').sum()/len(x)
     ).reset_index(name='return_rate')
 
     # Adopters of new launch (last 120 days)
     recent_cutoff = df['date'].max() - pd.Timedelta(days=120)
     adopters = (
-        df[(df['is_launch_sku'] == 1) & (df['date'] >= recent_cutoff)]
+        df[(df['is_launch_sku']==1) & (df['date']>=recent_cutoff)]
         .groupby('customer_id')
         .size()
         .reset_index(name='adopt_count')
     )
     adopters['adopter_of_new_launch'] = 1
 
-    # Merge all features
-    parts = [recency[['customer_id', 'recency_days']], frequency, monetary, more, pref_channel, top_cat, ret]
+    # Merge all
+    parts = [recency[['customer_id','recency_days']], frequency, monetary, more, pref_channel, top_cat, ret]
     cust = parts[0]
     for p in parts[1:]:
         cust = cust.merge(p, on='customer_id', how='left')
 
-    cust = cust.merge(
-        adopters[['customer_id', 'adopter_of_new_launch']], 
-        on='customer_id', how='left'
-    )
+    cust = cust.merge(adopters[['customer_id','adopter_of_new_launch']], on='customer_id', how='left')
     cust['adopter_of_new_launch'] = cust['adopter_of_new_launch'].fillna(0).astype(int)
 
     # Fill NaNs in numeric columns
-    num_cols = ['frequency_tx', 'total_spend', 'avg_ticket', 'avg_discount', 'avg_units', 'return_rate']
+    num_cols = ['frequency_tx','total_spend','avg_ticket','avg_discount','avg_units','return_rate']
     cust[num_cols] = cust[num_cols].fillna(0)
 
-    # Save to CSV
     cust.to_csv(CUSTOMER_FEATURES_CSV, index=False)
-
     return cust
+
 
 
 # -------------------------
